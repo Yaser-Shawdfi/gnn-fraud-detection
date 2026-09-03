@@ -10,6 +10,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 import torch
@@ -21,12 +22,145 @@ from gnn_fraud_detection.config import load_config  # noqa: E402
 MODELS = ["mlp", "gcn", "gat", "graphsage", "gin"]
 COMPARISON_CSV = PROJECT_ROOT / "reports" / "model_comparison.csv"
 COMPARISON_CSV_PP = PROJECT_ROOT / "reports" / "model_comparison_ellipticpp_actors.csv"
-# (label, processed file, comparison csv, node-count key)
+# (label, processed file, comparison csv)
 DATASETS = {
     "Elliptic (transactions)": ("elliptic.pt", COMPARISON_CSV),
     "Elliptic++ (actors)": ("ellipticpp_actors.pt", COMPARISON_CSV_PP),
     "Elliptic++ (tx)": ("ellipticpp_tx.pt", None),
 }
+
+
+@st.cache_resource
+def load_hetero_bundle():
+    """Merged hetero graph + Hetero-SAGE actor probabilities (cached)."""
+    cfg = load_config()
+    merged = cfg.processed_dir / "ellipticpp_merged.pt"
+    ckpt = PROJECT_ROOT / "data" / "checkpoints" / "heterosage_merged.pt"
+    if not merged.exists() or not ckpt.exists():
+        return None
+    from gnn_fraud_detection.hetero import HeteroGNN
+
+    data = torch.load(merged, weights_only=False)
+    # per-type z-score fit on train period (identical to the training path)
+    for nt in ("tx", "actor"):
+        m = data[nt].t <= cfg.split.train_max_t
+        mu = data[nt].x[m].mean(dim=0)
+        sd = data[nt].x[m].std(dim=0).clamp_min(1e-8)
+        data[nt].x = torch.nan_to_num((data[nt].x - mu) / sd, nan=0.0)
+
+    model = HeteroGNN(
+        data["tx"].x.size(1),
+        data["actor"].x.size(1),
+        cfg.model.hidden_dim,
+        cfg.model.num_layers,
+        cfg.model.dropout,
+    )
+    model.load_state_dict(torch.load(ckpt, weights_only=True))
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(dev).eval()
+    data_gpu = data.to(dev)
+    with torch.no_grad():
+        logits = model(
+            {"tx": data_gpu["tx"].x, "actor": data_gpu["actor"].x},
+            {rel: data_gpu[rel].edge_index for rel in data_gpu.edge_types},
+        )
+    probs = torch.sigmoid(logits).cpu().numpy()
+    return data, probs  # graph kept on CPU for cheap subgraph slicing
+
+
+def hetero_subgraph_figure(data_h, probs, actor_idx: int, max_nbrs: int = 30):
+    """1-hop typed-edge neighborhood of one actor as a plotly star graph."""
+    import plotly.graph_objects as go
+
+    aa = data_h["actor", "interacts", "actor"].edge_index
+    fa = data_h["tx", "flows", "actor"].edge_index
+    a = actor_idx
+
+    nbr_a = torch.cat([aa[0][aa[1] == a], aa[1][aa[0] == a]]).unique()
+    nbr_t = fa[0][fa[1] == a].unique()
+    if nbr_a.numel() > max_nbrs:
+        nbr_a = nbr_a[torch.randperm(nbr_a.numel())[:max_nbrs]]
+    if nbr_t.numel() > max_nbrs:
+        nbr_t = nbr_t[torch.randperm(nbr_t.numel())[:max_nbrs]]
+    na, ntx = nbr_a.tolist(), nbr_t.tolist()
+
+    pos = {a: (0.0, 0.0)}
+    for k, i in enumerate(na):
+        th = 2 * np.pi * k / max(len(na), 1)
+        pos[i] = (float(np.cos(th)), float(np.sin(th)))
+    for k, i in enumerate(ntx):
+        th = 2 * np.pi * (k + 0.5) / max(len(ntx), 1)
+        pos[i] = (float(1.9 * np.cos(th)), float(1.9 * np.sin(th)))
+
+    def edge_trace(pairs, color, name):
+        xs, ys = [], []
+        for s, d in pairs:
+            x0, y0 = pos[s]
+            x1, y1 = pos[d]
+            xs += [x0, x1, None]
+            ys += [y0, y1, None]
+        return go.Scatter(
+            x=xs, y=ys, mode="lines", line=dict(width=1, color=color), name=name, hoverinfo="skip"
+        )
+
+    def _lab(v):
+        return "illicit" if v == 1 else ("licit" if v == 0 else "unknown")
+
+    def actor_nodes_trace(nodes):
+        xs = [pos[n][0] for n in nodes]
+        ys = [pos[n][1] for n in nodes]
+        colors = [
+            "#cc3311"
+            if _lab(float(data_h["actor"].y[n])) == "illicit"
+            else ("#228833" if _lab(float(data_h["actor"].y[n])) == "licit" else "#999999")
+            for n in nodes
+        ]
+        sizes = [16 if n == actor_idx else 10 for n in nodes]
+        text = [
+            f"actor #{n} | t={int(data_h['actor'].t[n])} | "
+            f"{_lab(float(data_h['actor'].y[n]))} | p={probs[n]:.3f}"
+            for n in nodes
+        ]
+        return go.Scatter(
+            x=xs,
+            y=ys,
+            mode="markers",
+            name="actors",
+            marker=dict(size=sizes, symbol="circle", color=colors),
+            text=text,
+            hoverinfo="text",
+        )
+
+    def tx_nodes_trace(nodes):
+        xs = [pos[n][0] for n in nodes]
+        ys = [pos[n][1] for n in nodes]
+        text = [
+            f"tx #{n} | t={int(data_h['tx'].t[n])} | {_lab(float(data_h['tx'].y[n]))}"
+            for n in nodes
+        ]
+        return go.Scatter(
+            x=xs,
+            y=ys,
+            mode="markers",
+            name="transactions",
+            marker=dict(size=9, symbol="square", color="#ee7733"),
+            text=text,
+            hoverinfo="text",
+        )
+
+    fig = go.Figure()
+    fig.add_trace(edge_trace([(a, i) for i in na], "#33bbee", "actor-actor"))
+    fig.add_trace(edge_trace([(a, i) for i in ntx], "#cc3311", "tx-actor"))
+    fig.add_trace(actor_nodes_trace([a] + na))
+    fig.add_trace(tx_nodes_trace(ntx))
+    fig.update_layout(
+        height=460,
+        showlegend=True,
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False, scaleanchor="x", scaleratio=1),
+        margin=dict(l=10, r=10, t=10, b=10),
+    )
+    return fig
 
 
 @st.cache_data
@@ -72,8 +206,8 @@ def main():
     processed_file, comp_csv = DATASETS[ds_label]
     data, cfg = load_processed_graph(processed_file)
 
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["Overview", "Model Comparison", "Predict & Explain", "Dataset"]
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["Overview", "Model Comparison", "Predict & Explain", "Dataset", "Hetero Explorer"]
     )
 
     # ------------------------------------------------------------------ #
@@ -266,6 +400,81 @@ def main():
             "neighborhood statistics. The official release documents 166; this "
             "mirror ships 165."
         )
+
+    # ------------------------------------------------------------------ #
+    # Tab 5: Hetero Explorer (merged tx+actors graph, Hetero-SAGE)
+    # ------------------------------------------------------------------ #
+    with tab5:
+        st.markdown(
+            "**Merged heterogeneous graph**: transaction nodes + wallet-actor "
+            "nodes with typed edges (tx-tx money flow, actor-actor interaction, "
+            "tx-actor flow). Predictions from the trained HeteroConv GraphSAGE "
+            "(`heterosage_merged.pt`)."
+        )
+        bundle = load_hetero_bundle()
+        if bundle is None:
+            st.info(
+                "Run `gnn-fraud prepare --dataset ellipticpp --mode merged` and "
+                "`gnn-fraud train --model heterosage --dataset ellipticpp "
+                "--mode merged` first."
+            )
+        else:
+            data_h, probs = bundle
+            y_actor = data_h["actor"].y
+            t_actor = data_h["actor"].t
+
+            test_mask = (~torch.isnan(y_actor)) & (t_actor > cfg.split.val_max_t)
+            test_pool = torch.nonzero(test_mask).flatten()
+
+            col_a, col_b = st.columns([2, 3])
+            with col_a:
+                label_filter = st.radio("Show actors", ["illicit", "licit", "all"], horizontal=True)
+                max_nbrs = st.slider("Max neighbors per type", 5, 60, 25)
+            with col_b:
+                if label_filter == "illicit":
+                    pool = test_pool[(y_actor[test_pool] == 1).cpu().numpy()]
+                elif label_filter == "licit":
+                    pool = test_pool[(y_actor[test_pool] == 0).cpu().numpy()]
+                else:
+                    pool = test_pool
+                actor_id = st.selectbox(
+                    "Actor (test split)",
+                    pool.tolist(),
+                    format_func=lambda i: f"actor #{i} (t={int(t_actor[i])})",
+                )
+
+            y_true = int(y_actor[actor_id])
+            p = float(probs[actor_id])
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Illicit probability", f"{p:.3f}")
+            m2.metric(
+                "Actual",
+                "illicit" if y_true == 1 else "licit",
+            )
+            m3.metric(
+                "Verdict",
+                "correct" if (p >= 0.5) == (y_true == 1) else "miss",
+            )
+
+            aa = data_h["actor", "interacts", "actor"].edge_index
+            fa = data_h["tx", "flows", "actor"].edge_index
+            n_aa = int((aa[0] == actor_id).sum() + (aa[1] == actor_id).sum())
+            n_fa = int((fa[1] == actor_id).sum())
+            st.caption(
+                f"Actor #{actor_id}: {n_aa} actor-actor edges, {n_fa} "
+                f"tx-actor edges in the full graph (showing up to {max_nbrs} each)."
+            )
+
+            st.plotly_chart(
+                hetero_subgraph_figure(data_h, probs, actor_id, max_nbrs=max_nbrs),
+                use_container_width=True,
+            )
+            st.caption(
+                "Center = selected actor. Inner ring: actor-actor interactions "
+                "(blue edges). Outer ring: transactions flowing to the actor "
+                "(red edges, squares). Colors: red=illicit, green=licit, "
+                "grey=unknown ground truth."
+            )
 
 
 if __name__ == "__main__":
