@@ -224,18 +224,87 @@ def cmd_compare(args) -> None:
         overrides["data.dataset"] = args.dataset
     if args.mode:
         overrides["data.pp_mode"] = args.mode
+    if args.focal_gamma is not None:
+        overrides["training.focal_gamma"] = args.focal_gamma
+    seeds = list(args.seeds) if args.seeds else [None]
     rows = []
     for name in args.models:
-        try:
-            rows.append(_train_one(name, dict(overrides), tag=f"compare-{name}"))
-        except Exception as e:
-            print(f"!! {name} failed: {e}", file=sys.stderr)
-            raise
+        for seed in seeds:
+            ov = dict(overrides)
+            tag = f"compare-{name}" if seed is None else f"compare-{name}-s{seed}"
+            if seed is not None:
+                ov["training.seed"] = seed
+            try:
+                rows.append(_train_one(name, ov, tag=tag))
+            except Exception as e:
+                print(f"!! {name} failed: {e}", file=sys.stderr)
+                raise
     df = pd.DataFrame(rows)
     df.to_csv(out_csv, index=False)
     print("\n=== MODEL COMPARISON (test split, t42..t49) ===")
     print(df.to_string(index=False))
+    if len(seeds) > 1:
+        agg = df.groupby("model")[["roc_auc", "pr_auc", "f1"]].agg(["mean", "std"])
+        print("\n=== AGGREGATED OVER SEEDS ===")
+        print(agg.round(4).to_string())
+        agg_csv = Path("reports") / "model_comparison_aggregated.csv"
+        agg.round(4).to_csv(agg_csv)
+        print(f"saved -> {agg_csv}")
     print(f"\nsaved -> {out_csv}")
+
+
+def cmd_temporal(args) -> None:
+    """Tier-2 temporal evaluation: static per-step metrics + incremental FT."""
+    from .preprocessing import scale_features
+    from .temporal import (
+        incremental_finetune,
+        plot_temporal_comparison,
+        static_per_timestep,
+    )
+
+    overrides = {"model.name": args.model}
+    if args.dataset:
+        overrides["data.dataset"] = args.dataset
+    if args.mode:
+        overrides["data.pp_mode"] = args.mode
+    cfg = load_config(overrides)
+    _set_seed(cfg.training.seed)
+    data = load_processed(cfg)
+    scale_features(data, cfg)
+    masks = build_masks(data, cfg)
+    model = build_model(cfg.model.name, data.x.size(1), cfg.model)
+    ckpt = Path(cfg.checkpoint_dir) / f"{cfg.model.name}.pt"
+    if ckpt.exists():
+        model.load_state_dict(torch.load(ckpt, weights_only=True))
+        print(f"loaded checkpoint {ckpt}")
+    else:
+        print(f"no checkpoint for {cfg.model.name}; training one now")
+        history, artifacts = train_model(model, data, masks, cfg)
+        torch.save(model.state_dict(), ckpt)
+
+    static = static_per_timestep(model, data, cfg)
+    print("\n=== STATIC per test time step ===")
+    for s, m in sorted(static.items()):
+        print(f"  t={s}: n={m['n']:5d}  ROC-AUC {m['roc_auc']:.4f}  PR-AUC {m['pr_auc']:.4f}")
+
+    incr = (
+        incremental_finetune(data, cfg, model_name=cfg.model.name) if not args.static_only else None
+    )
+    if incr:
+        print("\n=== INCREMENTAL FT per test time step ===")
+        for s, m in sorted(incr["per_timestep"].items()):
+            print(f"  t={s}: ROC-AUC {m['roc_auc']:.4f}  PR-AUC {m['pr_auc']:.4f}")
+        print(f"  mean: ROC-AUC {incr['mean_roc_auc']:.4f} PR-AUC {incr['mean_pr_auc']:.4f}")
+
+    out_png = cfg.reports_dir / f"temporal_{cfg.model.name}.png"
+    plot_temporal_comparison(
+        static, incr["per_timestep"] if incr else None, out_png, cfg.model.name.upper()
+    )
+    import json as _json
+
+    out_json = cfg.reports_dir / f"temporal_{cfg.model.name}.json"
+    out_json.write_text(_json.dumps({"static": static, "incremental": incr}, indent=2, default=str))
+    print(f"\nsaved -> {out_png}\nsaved -> {out_json}")
 
 
 def cmd_explain(args) -> None:
@@ -306,6 +375,14 @@ def main(argv=None) -> int:
     p.add_argument("--models", nargs="+", default=["mlp", "gcn", "gat", "graphsage", "gin"])
     p.add_argument("--dataset", default=None, choices=["elliptic", "ellipticpp"])
     p.add_argument("--mode", default=None, choices=["tx", "actors", "merged"])
+    p.add_argument(
+        "--seeds",
+        nargs="+",
+        type=int,
+        default=None,
+        help="multi-seed mode: mean/std aggregation over these seeds",
+    )
+    p.add_argument("--focal-gamma", type=float, default=None, dest="focal_gamma")
     p.set_defaults(func=cmd_compare)
 
     p = sub.add_parser("explain", help="explain predictions (Captum)")
@@ -314,7 +391,16 @@ def main(argv=None) -> int:
         "--method", default="integrated_gradients", choices=["integrated_gradients", "saliency"]
     )
     p.add_argument("--n", type=int, default=5, help="nodes per class to explain")
+    p.add_argument("--dataset", default=None, choices=["elliptic", "ellipticpp"])
+    p.add_argument("--mode", default=None, choices=["tx", "actors", "merged"])
     p.set_defaults(func=cmd_explain)
+
+    p = sub.add_parser("temporal", help="per-time-step metrics + incremental FT baseline")
+    p.add_argument("--model", default="gcn")
+    p.add_argument("--dataset", default=None, choices=["elliptic", "ellipticpp"])
+    p.add_argument("--mode", default=None, choices=["tx", "actors", "merged"])
+    p.add_argument("--static-only", action="store_true", dest="static_only")
+    p.set_defaults(func=cmd_temporal)
 
     args = parser.parse_args(argv)
     return args.func(args) or 0

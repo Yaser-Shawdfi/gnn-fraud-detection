@@ -122,6 +122,63 @@ imbalanced fraud detection:
 - The MLP's decent ROC-AUC comes from the aggregated neighborhood features
   it gets for free - the precision/F1 gap is where graph structure pays off.
 
+### Robustness and temporal analysis
+
+**Focal loss (gamma=2.0) vs weighted BCE, tx graph:**
+
+| Model | BCE PR-AUC | Focal PR-AUC | BCE F1 | Focal F1 |
+|---|---|---|---|---|
+| MLP | 0.2473 | **0.3780** | 0.2709 | **0.3863** |
+| GCN | **0.4362** | 0.3229 | 0.4670 | 0.4050 |
+| GAT | 0.3673 | 0.2903 | 0.3719 | 0.3590 |
+| GraphSAGE | 0.3568 | 0.3735 | 0.3076 | 0.3943 |
+| GIN | 0.3747 | **0.4387** | 0.4023 | **0.4315** |
+
+Focal loss redistributes the wins: MLP and GIN jump substantially (GIN becomes
+the tx-graph runner-up), GCN's early-stopping advantage under BCE shrinks.
+Loss choice is a real hyperparameter on this dataset, not a footnote.
+
+**Multi-seed (3 seeds: 42/7/123), Elliptic++ actors graph, mean +/- std:**
+
+| Model | ROC-AUC | PR-AUC | F1 |
+|---|---|---|---|
+| GraphSAGE | 0.8301 +/- 0.0166 | 0.2713 +/- 0.0667 | 0.2720 +/- 0.0347 |
+| MLP | 0.7229 +/- 0.0040 | 0.1378 +/- 0.0113 | 0.1444 +/- 0.0164 |
+| GAT | 0.7177 +/- 0.0156 | 0.1298 +/- 0.0082 | 0.2091 +/- 0.0157 |
+| GIN | 0.7043 +/- 0.0086 | 0.1047 +/- 0.0074 | 0.0352 +/- 0.0444 |
+| GCN | 0.6845 +/- 0.0021 | 0.1311 +/- 0.0037 | 0.0904 +/- 0.0027 |
+
+GraphSAGE's dominance is real but high-variance on PR-AUC (0.27 +/- 0.07) -
+it wins every seed, by how much varies. GCN/GAT genuinely collapse on this
+graph (tight stds well below SAGE).
+
+**GCN at 400 epochs, tx graph:** 0.8064 ROC / 0.3446 PR - worse than the
+200-epoch run (0.8143/0.4362). The 200-epoch result was already past the
+sweet spot; longer training overfits the train window on a temporal split.
+
+**Temporal analysis (GCN, Elliptic++ actors, per test time step):**
+
+| t | Static ROC | Incremental FT ROC | Static AP | Incr FT AP |
+|---|---|---|---|---|
+| 42 | 0.860 | **0.903** | 0.276 | 0.372 |
+| 43 | 0.738 | 0.752 | 0.037 | 0.040 |
+| 44 | 0.892 | 0.862 | 0.297 | 0.162 |
+| 45 | 0.704 | 0.801 | 0.007 | 0.012 |
+| 46 | **0.219** | 0.228 | 0.230 | 0.208 |
+| 47 | 0.746 | 0.737 | 0.054 | 0.055 |
+| 48 | 0.834 | **0.879** | 0.128 | 0.196 |
+| 49 | 0.778 | **0.858** | 0.317 | **0.427** |
+| mean | 0.723 | **0.753** | 0.166 | **0.184** |
+
+Static models swing wildly between adjacent periods (t44: 0.89 vs t46: 0.22)
+- per-period fraud behavior shifts fast. Periodic fine-tuning as labels
+arrive lifts mean ROC +0.03 and mean PR-AUC +0.02, and wins or ties 5 of 8
+steps - the deployed-system lesson: retrain often, the graph drifts. Full
+per-step JSON + plot in `reports/temporal_gcn.{json,png}`.
+
+Commands: `compare --focal-gamma 2.0`, `compare --seeds 42 7 123 ...`,
+`temporal --model gcn --dataset ellipticpp --mode actors`.
+
 ## Project layout
 
 ```
