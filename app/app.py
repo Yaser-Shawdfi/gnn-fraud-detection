@@ -20,16 +20,30 @@ from gnn_fraud_detection.config import load_config  # noqa: E402
 
 MODELS = ["mlp", "gcn", "gat", "graphsage", "gin"]
 COMPARISON_CSV = PROJECT_ROOT / "reports" / "model_comparison.csv"
+COMPARISON_CSV_PP = PROJECT_ROOT / "reports" / "model_comparison_ellipticpp_actors.csv"
+# (label, processed file, comparison csv, node-count key)
+DATASETS = {
+    "Elliptic (transactions)": ("elliptic.pt", COMPARISON_CSV),
+    "Elliptic++ (actors)": ("ellipticpp_actors.pt", COMPARISON_CSV_PP),
+    "Elliptic++ (tx)": ("ellipticpp_tx.pt", None),
+}
 
 
 @st.cache_data
-def load_processed_graph():
+def load_processed_graph(processed_file: str):
     from gnn_fraud_detection.preprocessing import scale_features
 
     cfg = load_config()
-    data = torch.load(cfg.processed_dir / "elliptic.pt", weights_only=False)
+    data = torch.load(cfg.processed_dir / processed_file, weights_only=False)
     scale_features(data, cfg)
     return data, cfg
+
+
+@st.cache_data
+def load_comparison(csv_path: Path) -> pd.DataFrame | None:
+    if csv_path.exists():
+        return pd.read_csv(csv_path)
+    return None
 
 
 @st.cache_resource
@@ -47,21 +61,16 @@ def load_model(_data, model_name: str):
     return model
 
 
-@st.cache_data
-def load_comparison() -> pd.DataFrame | None:
-    if COMPARISON_CSV.exists():
-        return pd.read_csv(COMPARISON_CSV)
-    return None
-
-
 def main():
     st.title("GNN Bitcoin Fraud Detection")
     st.caption(
-        "Elliptic dataset | 203,769 transactions | temporal test split t42-t49 | "
-        "MLP vs GCN vs GAT vs GraphSAGE vs GIN"
+        "Elliptic + Elliptic++ | temporal test split t42-t49 | "
+        "MLP vs GCN vs GAT vs GraphSAGE vs GIN vs Hetero-SAGE"
     )
 
-    data, cfg = load_processed_graph()
+    ds_label = st.sidebar.selectbox("Dataset / graph", list(DATASETS.keys()), index=0)
+    processed_file, comp_csv = DATASETS[ds_label]
+    data, cfg = load_processed_graph(processed_file)
 
     tab1, tab2, tab3, tab4 = st.tabs(
         ["Overview", "Model Comparison", "Predict & Explain", "Dataset"]
@@ -78,7 +87,7 @@ def main():
         labeled = (~torch.isnan(y)).sum().item()
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Transactions", f"{data.num_nodes:,}")
+        c1.metric("Nodes", f"{data.num_nodes:,}")
         c2.metric("Edges (symmetrized)", f"{data.edge_index.size(1):,}")
         c3.metric("Labeled", f"{labeled:,}")
         c4.metric("Illicit", f"{int((y == 1).sum()):,}")
@@ -88,7 +97,7 @@ def main():
             "test t42-t49. Unknown-class nodes are never in any split."
         )
 
-        comp = load_comparison()
+        comp = load_comparison(comp_csv)
         if comp is not None:
             st.subheader("Test-split results")
             st.dataframe(comp, use_container_width=True, hide_index=True)
@@ -104,9 +113,12 @@ def main():
     # Tab 2: Model comparison bar chart
     # ------------------------------------------------------------------ #
     with tab2:
-        comp = load_comparison()
+        comp = load_comparison(comp_csv)
         if comp is None:
-            st.info("Run `.venv/Scripts/gnn-fraud compare` first to generate results.")
+            st.info(
+                "Run the corresponding `gnn-fraud compare` command first to "
+                "generate results for this dataset."
+            )
         else:
             import plotly.express as px
 
