@@ -1,0 +1,68 @@
+# Project Defaults
+# Single source of truth for paths, data, model, and training settings.
+# CLI overrides (e.g. --epochs 100) take precedence over this file.
+
+data:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  checkpoint_dir: data/checkpoints
+  reports_dir: reports
+  # Elliptic bitcoin dataset (Weber et al., 2019)
+  # 203,769 tx nodes / 166 features + time-step
+  # classes: 1 = illicit, 2 = licit, unknown = unlabeled
+  features_file: elliptic_txs_features.csv
+  edgelist_file: elliptic_txs_edgelist.csv
+  classes_file: elliptic_txs_classes.csv
+
+graph:
+  # Treat the graph as directed (money flow src -> dst).
+  # If false, edges are symmetrized (dst -> src added back).
+  directed: false
+  # Number of time steps in the dataset (49 two-week periods).
+  num_timesteps: 49
+
+split:
+  # Elliptic semi-supervised protocol:
+  # train on t1..t33 labeled nodes; validate on t34..t41 labeled nodes
+  # test on t42..t49 labeled nodes
+  train_max_t: 33
+  val_max_t: 41
+  # Class weighting: weight illicit class to counter imbalance (~10% of labeled)
+  pos_weight: null  # null = auto-computed from label frequencies
+
+model:
+  # One of: gcn | gat | graphsage | gin | mlp
+  name: gat
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.6
+  # GAT specific
+  heads: 4
+  # GIN specific
+  gin_train_eps: true
+
+training:
+  seed: 42
+  device: cuda  # auto-falls back to cpu
+  epochs: 200
+  lr: 0.005
+  weight_decay: 0.0005
+  # Full-batch training. The Elliptic graph fits in VRAM (~200k nodes).
+  batch_size: null
+  # Early stopping on validation AUC+AP composite
+  patience: 30
+  # Gradient clipping (max L2 norm). Stabilizes training with weighted BCE.
+  max_grad_norm: 5.0
+  # Focal loss option for extreme imbalance experiments (null = BCEWithLogits)
+  focal_gamma: null
+
+evaluation:
+  # Decision threshold selection strategy on validation:
+  # "f1" = maximize F1 on validation
+  # "youden" = maximize Youden's J (TPR - FPR)
+  threshold_strategy: f1
+
+mlflow:
+  enabled: true
+  tracking_uri: sqlite:///./data/mlflow.db
+  experiment_name: gnn-fraud-detection
