@@ -179,6 +179,60 @@ per-step JSON + plot in `reports/temporal_gcn.{json,png}`.
 Commands: `compare --focal-gamma 2.0`, `compare --seeds 42 7 123 ...`,
 `temporal --model gcn --dataset ellipticpp --mode actors`.
 
+## v3: scalability - mini-batching + DGraphFin (3.7M nodes)
+
+Full-batch training requires the whole graph in VRAM; real fraud graphs are
+far bigger. `gnn-fraud train-minibatch` trains on **sampled 2-hop subgraphs**
+using a dependency-free neighbor sampler (`pure_minibatch.py`): CSR index via
+argsort+searchsorted, fully vectorized per-hop gathers (~25 ms per 4096-seed
+2-hop sample on the 1.27M-node actors graph). No compiled PyG extensions
+needed - which matters because the pyg wheel host (`data.pyg.org`) currently
+serves NODATA globally, so neither `torch-sparse` nor `pyg-lib` is installable
+right now. The sampler/trainer is validated against the known result:
+GraphSAGE through the mini-batch path reaches ~0.72 val ROC-AUC in 3 epochs
+on the Elliptic++ actors graph (full-batch best: 0.85), and trains the
+3.7M-node DGraphFin at ~1 s/epoch on the RTX 4090.
+
+**DGraphFin** (FinVolution fintech fraud graph, the largest public financial
+fraud benchmark): 3,700,550 user nodes, 4,300,999 directed edges, 20 features
+in the npz (the paper documents 17), fraud = class 3 (23.08%). Downloaded via
+the HF mirror `cryoushiwo/DGraph` (direct zip also at
+`dgraph.xinye.com/dataset/DGraphFin.zip`). We ignore the official random
+split and apply our temporal protocol: node time = max incident edge
+timestamp (day 1-821), train <= day 566, val <= 667, test = last 25%
+(3.59M nodes).
+
+**Findings on DGraphFin (temporal split):**
+
+| Model (dropout 0.2, temporal split) | Test ROC-AUC | Test PR-AUC |
+|---|---|---|
+| MLP (mini-batch, 25 epochs) | 0.574 | 0.247 |
+| GraphSAGE (mini-batch, 2-hop) | 0.53-0.59 across configs | 0.24-0.28 |
+
+Both sit far below the 0.73-0.75 published on the official RANDOM split -
+the same lesson as Elliptic: random splits leak (test users' features and
+edges are visible during training), temporal splits do not. Two structural
+reasons the GNN degrades toward the constant solution here:
+
+1. **Heterophily**: emergency-contact edges link fraudsters mostly to
+   non-fraudsters, so mean-aggregation over neighbors washes out the seed's
+   own (informative) features; single-feature AUC tops out at 0.656 and the
+   MLP holds ~0.71 val while the GNN regresses to the class prior.
+2. **Stochastic retraining instability**: per-batch weighted BCE on 24%
+   positives oscillates val AUC between epochs; the full-batch MLP on the
+   identical split is stable. Lower LR + smaller sampling budgets help but
+   don't fully remove it.
+
+The honest v3 conclusion: the mini-batching machinery is proven and fast;
+DGraphFin's graph signal under a real deployment-style split is weak, and
+cracking it (heterophily-aware aggregation, signed/directed convs) is the
+clear next research step rather than a tuning matter.
+
+```bash
+gnn-fraud train-minibatch --model graphsage --dataset dgraphfin \
+    --epochs 40 --batch 4096 --neighbors "20,10"
+```
+
 ## Project layout
 
 ```
@@ -186,14 +240,20 @@ gnn-fraud-detection/
 ├── config/settings.yaml          # all hyperparameters, single source of truth
 ├── src/gnn_fraud_detection/
 │   ├── config.py                 # YAML + env + CLI overrides (dataclasses)
-│   ├── data_loader.py            # CSVs -> PyG Data (label alignment by txId)
+│   ├── data_loader.py            # Elliptic CSVs -> PyG Data; dataset dispatch
+│   ├── data_loader_pp.py         # Elliptic++ tx + actors graph loaders
+│   ├── hetero.py                 # merged HeteroData + HeteroConv GNN
+│   ├── train_hetero.py           # heterogeneous training loop
+│   ├── dgraphfin.py              # DGraphFin npz loader (3.7M-node fintech graph)
+│   ├── pure_minibatch.py         # dependency-free neighbor sampler + trainer
+│   ├── temporal.py               # per-time-step metrics + incremental FT
 │   ├── splits.py                 # temporal masks, pos_weight, threshold picker
 │   ├── models.py                 # MLP / GCN / GAT / GraphSAGE / GIN
 │   ├── train.py                  # full-batch loop, early stopping, FocalLoss
 │   ├── evaluate.py               # test metrics, ROC/PR plots, curves
 │   ├── explain.py                # Captum IG + saliency attribution
 │   ├── mlflow_utils.py           # experiment tracking helpers
-│   └── cli.py                    # prepare / train / compare / explain
+│   └── cli.py                    # prepare / train / compare / explain / temporal / train-minibatch
 ├── tests/                        # pytest: masks, models, e2e smoke, focal loss
 ├── data/raw|processed|checkpoints
 └── reports/                      # comparison CSV, curves, ROC/PR, explanations

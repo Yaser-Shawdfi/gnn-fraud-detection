@@ -72,6 +72,13 @@ class TrainingConfig:
 
 
 @dataclass
+class MinibatchConfig:
+    batch_size: int = 2048
+    num_neighbors: str = "15,10"  # 1-hop, 2-hop sampling budgets
+    num_workers: int = 0
+
+
+@dataclass
 class EvaluationConfig:
     threshold_strategy: str = "f1"
 
@@ -90,6 +97,7 @@ class Config:
     split: SplitConfig
     model: ModelConfig
     training: TrainingConfig
+    minibatch: MinibatchConfig
     evaluation: EvaluationConfig
     mlflow: MLflowConfig
     root: Path = PROJECT_ROOT
@@ -171,6 +179,7 @@ def load_config(overrides: Optional[dict[str, Any]] = None) -> Config:
         split=SplitConfig(**raw["split"]),
         model=ModelConfig(**raw["model"]),
         training=TrainingConfig(**raw["training"]),
+        minibatch=MinibatchConfig(**(raw.get("minibatch") or {})),
         evaluation=EvaluationConfig(**raw["evaluation"]),
         mlflow=MLflowConfig(**raw["mlflow"]),
         root=PROJECT_ROOT,

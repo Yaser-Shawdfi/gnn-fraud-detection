@@ -307,6 +307,71 @@ def cmd_temporal(args) -> None:
     print(f"\nsaved -> {out_png}\nsaved -> {out_json}")
 
 
+def cmd_train_minibatch(args) -> None:
+    """v3 scalability path: pure-torch mini-batch training (no compiled deps)."""
+    from .preprocessing import scale_features
+    from .pure_minibatch import PureTrainer
+
+    if args.dataset == "dgraphfin":
+        from .dgraphfin import build_dgraphfin
+
+        cfg = load_config({"data.dataset": "dgraphfin", "model.name": args.model})
+        if getattr(args, "batch_size", None):
+            cfg.minibatch.batch_size = args.batch_size
+        if getattr(args, "neighbors", None):
+            cfg.minibatch.num_neighbors = args.neighbors
+        if args.epochs:
+            cfg.training.epochs = args.epochs
+        _set_seed(cfg.training.seed)
+        data = build_dgraphfin(cfg)
+        # y = -100 rows are the npz's held-out test users: mark unlabeled
+        data.y[data.y < 0] = float("nan")
+        # standardize on train-period nodes only (fixes constant-logit stall)
+        from .preprocessing import scale_features
+
+        scale_features(data, cfg)
+        print(
+            f"DGraphFin: nodes={data.num_nodes:,} edges={data.edge_index.size(1):,} "
+            f"fraud={int((data.y == 1).sum()):,} "
+            f"({(data.y == 1).float().mean() * 100:.2f}%)"
+        )
+    else:
+        overrides = {"model.name": args.model}
+        if args.dataset:
+            overrides["data.dataset"] = args.dataset
+        if args.mode:
+            overrides["data.pp_mode"] = args.mode
+        cfg = load_config(overrides)
+        if getattr(args, "batch_size", None):
+            cfg.minibatch.batch_size = args.batch_size
+        if getattr(args, "neighbors", None):
+            cfg.minibatch.num_neighbors = args.neighbors
+        if args.epochs:
+            cfg.training.epochs = args.epochs
+        _set_seed(cfg.training.seed)
+        data = load_processed(cfg)
+        scale_features(data, cfg)
+
+    trainer = PureTrainer(data, cfg, args.model)
+    history, artifacts = trainer.run()
+    m = artifacts["metrics"]
+    row = {
+        "model": f"{args.model}-mb",
+        "roc_auc": round(m["roc_auc"], 4),
+        "pr_auc": round(m["pr_auc"], 4),
+        "f1": round(m["f1"], 4),
+        "precision": round(m["precision"], 4),
+        "recall": round(m["recall"], 4),
+        "best_epoch": artifacts["best_epoch"],
+        "train_s": round(artifacts["train_seconds"], 1),
+    }
+    print(json.dumps(row, indent=2))
+    torch.save(
+        trainer.model.state_dict(),
+        Path(cfg.checkpoint_dir) / f"{args.model}-mb-{cfg.data.dataset}.pt",
+    )
+
+
 def cmd_explain(args) -> None:
     cfg = load_config({"model.name": args.model})
     data = load_processed(cfg)
@@ -401,6 +466,19 @@ def main(argv=None) -> int:
     p.add_argument("--mode", default=None, choices=["tx", "actors", "merged"])
     p.add_argument("--static-only", action="store_true", dest="static_only")
     p.set_defaults(func=cmd_temporal)
+
+    p = sub.add_parser("train-minibatch", help="NeighborLoader mini-batch training (scalability)")
+    p.add_argument(
+        "--model", default="graphsage", choices=["gcn", "gat", "graphsage", "gin", "mlp"]
+    )
+    p.add_argument(
+        "--dataset", default="dgraphfin", choices=["elliptic", "ellipticpp", "dgraphfin"]
+    )
+    p.add_argument("--mode", default=None, choices=["tx", "actors", "merged"])
+    p.add_argument("--epochs", type=int, default=None)
+    p.add_argument("--batch", type=int, default=None, dest="batch_size")
+    p.add_argument("--neighbors", default=None, help='per-hop budgets, e.g. "15,10"')
+    p.set_defaults(func=cmd_train_minibatch)
 
     args = parser.parse_args(argv)
     return args.func(args) or 0

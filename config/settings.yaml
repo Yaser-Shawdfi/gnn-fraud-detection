@@ -60,6 +60,12 @@ training:
   # Focal loss option for extreme imbalance experiments (null = BCEWithLogits)
   focal_gamma: null
 
+minibatch:
+  # NeighborLoader settings (v3 scalability path)
+  batch_size: 2048
+  num_neighbors: "15,10"  # per-hop sampling budgets, comma-separated
+  num_workers: 0
+
 evaluation:
   # Decision threshold selection strategy on validation:
   # "f1" = maximize F1 on validation
