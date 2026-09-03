@@ -10,7 +10,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 import torch
@@ -18,7 +17,6 @@ import torch
 st.set_page_config(page_title="GNN Bitcoin Fraud Detection", page_icon=None, layout="wide")
 
 from gnn_fraud_detection.config import load_config  # noqa: E402
-from gnn_fraud_detection.evaluate import metrics_row  # noqa: E402
 
 MODELS = ["mlp", "gcn", "gat", "graphsage", "gin"]
 COMPARISON_CSV = PROJECT_ROOT / "reports" / "model_comparison.csv"
@@ -26,7 +24,6 @@ COMPARISON_CSV = PROJECT_ROOT / "reports" / "model_comparison.csv"
 
 @st.cache_data
 def load_processed_graph():
-    from gnn_fraud_detection.data_loader import load_processed
     from gnn_fraud_detection.preprocessing import scale_features
 
     cfg = load_config()
@@ -218,9 +215,7 @@ def main():
         df_stats = pd.DataFrame(
             {
                 "time step": range(1, 50),
-                "illicit": [
-                    int(((y == 1) & (t == s)).sum()) for s in range(1, 50)
-                ],
+                "illicit": [int(((y == 1) & (t == s)).sum()) for s in range(1, 50)],
                 "licit": [int(((y == 0) & (t == s)).sum()) for s in range(1, 50)],
                 "unknown": [int((torch.isnan(y) & (t == s)).sum()) for s in range(1, 50)],
             }
@@ -235,17 +230,29 @@ def main():
             title="Class distribution across the 49 two-week time steps",
         )
         # shade the split boundaries
-        fig.add_vrect(x0=33.5, x1=34.5, line_width=0, fillcolor="#33bbee", opacity=0.15,
-                      annotation_text="train | val")
-        fig.add_vrect(x0=41.5, x1=42.5, line_width=0, fillcolor="#cc3311", opacity=0.15,
-                      annotation_text="val | test")
+        fig.add_vrect(
+            x0=33.5,
+            x1=34.5,
+            line_width=0,
+            fillcolor="#33bbee",
+            opacity=0.15,
+            annotation_text="train | val",
+        )
+        fig.add_vrect(
+            x0=41.5,
+            x1=42.5,
+            line_width=0,
+            fillcolor="#cc3311",
+            opacity=0.15,
+            annotation_text="val | test",
+        )
         st.plotly_chart(fig, use_container_width=True)
 
         st.markdown(
-            "165 raw features per transaction: 94 local (fee, version, R/B types, "
-            "input/output counts, BTC amounts) + 71 aggregated one-hop neighborhood "
-            "statistics. This mirror ships 165 features; the official release "
-            "documents 166."
+            "165 features per transaction in this release: 94 local (fee, version, "
+            "R/B types, input/output counts, BTC amounts) + 71 aggregated one-hop "
+            "neighborhood statistics. The official release documents 166; this "
+            "mirror ships 165."
         )
 
 

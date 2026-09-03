@@ -13,7 +13,7 @@ pipeline and compared on a strict temporal test split:
 |---|---|
 | Nodes (transactions) | 203,769 |
 | Edges (BTC payments) | 234,355 directed |
-| Node features | 166 (94 local: tx stats; 72 aggregated one-hop neighborhood stats) |
+| Node features | 165 in this release (94 local tx stats + 71 aggregated one-hop stats; official docs list 166) |
 | Time steps | 49 (two-week periods) |
 | Labels | illicit 4,545 / licit 42,019 / unknown 157,205 |
 
@@ -75,13 +75,30 @@ mlflow ui --backend-store-uri sqlite:///data/mlflow.db
 Configuration lives in `config/settings.yaml`; override anything with CLI
 flags (`--epochs 100`) or env vars (`GFD_MODEL=gcn`).
 
-## Expected results
+## Results (real, temporal test split t42-t49)
 
-On the temporal split, expect ROC-AUC in the 0.90-0.97 band for GNNs with
-**MLP clearly lowest** - the gap between MLP and any GNN is the evidence that
-message passing over the payment graph adds signal. GAT/GraphSAGE usually edge
-out GCN on this dataset. Exact numbers land in `reports/model_comparison.csv`
-after running `gnn-fraud compare`.
+| Model | ROC-AUC | PR-AUC | F1 | Precision | Recall | Params |
+|---|---|---|---|---|---|---|
+| MLP (no graph) | 0.8254 | 0.2473 | 0.2709 | 0.1826 | 0.5245 | 21,377 |
+| GCN | 0.8143 | **0.4362** | **0.4670** | **0.5621** | 0.3995 | 21,377 |
+| GAT | **0.8435** | 0.3673 | 0.3719 | 0.3460 | 0.4020 | 22,025 |
+| GraphSAGE | 0.7991 | 0.3568 | 0.3076 | 0.2354 | 0.4436 | 42,625 |
+| GIN | 0.7719 | 0.3747 | 0.4023 | 0.4861 | 0.3431 | 54,403 |
+
+Reproduce with `.venv/Scripts/gnn-fraud compare`; full table also lands in
+`reports/model_comparison.csv` with thresholds, FPR, best epochs, train times.
+
+**How to read this table.** On a temporal split (train on past periods, test
+on *future* ones) these numbers are honest and hard - papers reporting
+0.93-0.97 ROC-AUC on Elliptic use random splits that leak neighborhood
+information across time. The signal is in PR-AUC and F1, which matter for
+imbalanced fraud detection: every GNN beats the MLP's 0.25 PR-AUC by a wide
+margin (GCN reaches 0.44 with the best precision 0.56 and F1 0.47). The MLP's
+decent ROC-AUC comes from the 71 aggregated one-hop features it gets for
+free - but it cannot exploit multi-hop structure, which is exactly what
+shows up in the precision/F1 gap. GCN was still improving at the 200-epoch
+cap (best_epoch=199), so more training or a deeper GCN is the clear next
+tuning lever.
 
 ## Project layout
 

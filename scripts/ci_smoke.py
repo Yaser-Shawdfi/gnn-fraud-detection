@@ -41,9 +41,7 @@ def main() -> int:
     data = Data(x=x, edge_index=ei, y=y, t=t)
     data.num_nodes = n
 
-    cfg = load_config(
-        {"training.epochs": 5, "training.patience": 5, "mlflow.enabled": False}
-    )
+    cfg = load_config({"training.epochs": 5, "training.patience": 5, "mlflow.enabled": False})
     scale_features(data, cfg)
     masks = build_masks(data, cfg)
     model = build_model("gcn", in_dim, cfg.model)

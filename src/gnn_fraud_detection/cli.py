@@ -59,8 +59,10 @@ def cmd_prepare(args) -> None:
     print(f"saved -> {out}  ({time.time() - t0:.1f}s)")
 
 
-def _train_one(model_name: str, overrides: dict, tag: str | None = None) -> dict:
+def _train_one(model_name: str, overrides: dict | None = None, tag: str | None = None) -> dict:
     """Shared training pipeline; returns a row for the comparison table."""
+    overrides = dict(overrides or {})
+    overrides.setdefault("model.name", model_name)
     cfg = load_config(overrides)
     _set_seed(cfg.training.seed)
     data = load_processed(cfg)
