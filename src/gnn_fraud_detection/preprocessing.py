@@ -32,6 +32,9 @@ def scale_features(data, cfg: Config) -> None:
     std = x_tr.std(dim=0).clamp_min(1e-8)
 
     data.x = (data.x - mean) / std
+    # Elliptic++ tx features contain NaNs (e.g. in/out_txs_degree, 965 rows).
+    # After z-scoring, NaN -> 0 equals mean imputation.
+    data.x = torch.nan_to_num(data.x, nan=0.0)
     data.x_mean = mean
     data.x_std = std
 

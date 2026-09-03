@@ -54,19 +54,25 @@ uv pip install --python .venv torch --index-url https://download.pytorch.org/whl
 uv pip install --python .venv torch_geometric pandas numpy scikit-learn \
     matplotlib pyyaml tqdm mlflow captum
 
-# 2. Download the 3 dataset CSVs into data/raw/
-#    (Kaggle: ellipticco/elliptic-data-set, or the HF mirror
-#     huggingface.co/datasets/yhoma/elliptic-bitcoin-dataset)
-#    elliptic_txs_features.csv / elliptic_txs_edgelist.csv / elliptic_txs_classes.csv
+# 2. Datasets into data/raw/
+#    Elliptic  : 3 CSVs (Kaggle ellipticco/elliptic-data-set or the HF mirror
+#                huggingface.co/datasets/yhoma/elliptic-bitcoin-dataset)
+#    Elliptic++: 8 CSVs from github.com/git-disl/EllipticPlusPlus
+#                (Transactions Dataset/ and Actors Dataset/ folders ->
+#                 put flat into data/raw/ellipticpp/)
 
-# 3. Build the graph, train one model, explain it
+# 3. Build graphs, train, compare (classic dataset)
 uv pip install --python .venv -e .[dev]
-.venv/Scripts/gnn-fraud prepare
-.venv/Scripts/gnn-fraud train --model gat
-.venv/Scripts/gnn-fraud explain --model gat
+gnn-fraud prepare
+gnn-fraud train --model gat
+gnn-fraud compare
+gnn-fraud explain --model gat
 
-# 4. Head-to-head comparison of all 5 architectures
-.venv/Scripts/gnn-fraud compare
+# 4. Elliptic++ (KDD'23): actors task + heterogeneous merged graph
+gnn-fraud prepare --dataset ellipticpp --mode actors
+gnn-fraud compare --dataset ellipticpp --mode actors
+gnn-fraud prepare --dataset ellipticpp --mode merged
+gnn-fraud train --model heterosage --dataset ellipticpp --mode merged
 
 # 5. Inspect experiments
 mlflow ui --backend-store-uri sqlite:///data/mlflow.db
@@ -77,6 +83,8 @@ flags (`--epochs 100`) or env vars (`GFD_MODEL=gcn`).
 
 ## Results (real, temporal test split t42-t49)
 
+### Elliptic (classic release, 165-feature transaction graph)
+
 | Model | ROC-AUC | PR-AUC | F1 | Precision | Recall | Params |
 |---|---|---|---|---|---|---|
 | MLP (no graph) | 0.8254 | 0.2473 | 0.2709 | 0.1826 | 0.5245 | 21,377 |
@@ -85,20 +93,34 @@ flags (`--epochs 100`) or env vars (`GFD_MODEL=gcn`).
 | GraphSAGE | 0.7991 | 0.3568 | 0.3076 | 0.2354 | 0.4436 | 42,625 |
 | GIN | 0.7719 | 0.3747 | 0.4023 | 0.4861 | 0.3431 | 54,403 |
 
-Reproduce with `.venv/Scripts/gnn-fraud compare`; full table also lands in
-`reports/model_comparison.csv` with thresholds, FPR, best epochs, train times.
+### Elliptic++ actors graph (wallet-address detection, 1.27M interaction nodes)
 
-**How to read this table.** On a temporal split (train on past periods, test
+| Model | ROC-AUC | PR-AUC | F1 | Precision | Recall |
+|---|---|---|---|---|---|
+| MLP | 0.7247 | 0.1347 | 0.1337 | 0.1462 | 0.1232 |
+| GCN | 0.6825 | 0.1273 | 0.0883 | 0.0937 | 0.0834 |
+| GAT | 0.7090 | 0.1252 | 0.2012 | 0.1654 | 0.2570 |
+| **GraphSAGE** | **0.8484** | **0.3476** | **0.3111** | **0.2175** | **0.5462** |
+| GIN | 0.7151 | 0.1069 | 0.0056 | 0.0149 | 0.0035 |
+| Hetero-SAGE (merged tx+actors, 7.0M typed edges) | 0.8448 | 0.2348 | 0.3347 | 0.2709 | 0.4379 |
+
+**How to read these tables.** On a temporal split (train on past periods, test
 on *future* ones) these numbers are honest and hard - papers reporting
 0.93-0.97 ROC-AUC on Elliptic use random splits that leak neighborhood
 information across time. The signal is in PR-AUC and F1, which matter for
-imbalanced fraud detection: every GNN beats the MLP's 0.25 PR-AUC by a wide
-margin (GCN reaches 0.44 with the best precision 0.56 and F1 0.47). The MLP's
-decent ROC-AUC comes from the 71 aggregated one-hop features it gets for
-free - but it cannot exploit multi-hop structure, which is exactly what
-shows up in the precision/F1 gap. GCN was still improving at the 200-epoch
-cap (best_epoch=199), so more training or a deeper GCN is the clear next
-tuning lever.
+imbalanced fraud detection:
+
+- **Transactions graph**: every GNN beats the MLP's 0.25 PR-AUC (GCN reaches
+  0.44 with the best precision 0.56 and F1 0.47).
+- **Architecture-task interaction**: GCN/GAT win the transactions graph, but
+  **GraphSAGE dominates the actors graph** (0.85 ROC / 0.35 PR vs <0.71 ROC
+  for GCN/GAT there) - mean-aggregation generalizes better on the actor
+  graph's noisy duplicated-interaction structure where attention overfits.
+- **Heterogeneous merged graph** (tx context + actors, HeteroConv SAGE):
+  matches actors-only ROC but does not beat it on PR-AUC - the wallet
+  features already carry most of the signal; tx context helps recall.
+- The MLP's decent ROC-AUC comes from the aggregated neighborhood features
+  it gets for free - the precision/F1 gap is where graph structure pays off.
 
 ## Project layout
 

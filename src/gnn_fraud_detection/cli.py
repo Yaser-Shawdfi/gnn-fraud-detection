@@ -20,7 +20,7 @@ import pandas as pd
 import torch
 
 from .config import load_config
-from .data_loader import build_graph, load_processed, save_processed
+from .data_loader import load_dataset, load_processed, save_processed
 from .evaluate import (
     evaluate_model,
     metrics_row,
@@ -45,18 +45,83 @@ def _set_seed(seed: int) -> None:
 
 
 def cmd_prepare(args) -> None:
-    cfg = load_config()
+    overrides = {}
+    if args.dataset:
+        overrides["data.dataset"] = args.dataset
+    if args.mode:
+        overrides["data.pp_mode"] = args.mode
+    cfg = load_config(overrides)
     t0 = time.time()
-    print("Building graph from raw CSVs...")
-    data = build_graph(cfg)
+    print(f"Building graph: dataset={cfg.data.dataset} mode={cfg.data.pp_mode}")
+    data = load_dataset(cfg)
+    if hasattr(data, "node_types"):  # HeteroData: report per node type
+        for nt in data.node_types:
+            n_lab = int((~torch.isnan(data[nt].y)).sum())
+            print(
+                f"{nt}: nodes={data[nt].num_nodes:,} labeled={n_lab:,} "
+                f"illicit={int((data[nt].y == 1).sum()):,}"
+            )
+        n_edges = sum(data[rel].edge_index.size(1) for rel in data.edge_types)
+        print(f"edges={n_edges:,} across {len(data.edge_types)} relations")
+    else:
+        n_lab = int((~torch.isnan(data.y)).sum())
+        print(
+            f"nodes={data.num_nodes:,} edges={data.edge_index.size(1):,} "
+            f"labeled={n_lab:,} ({n_lab / data.num_nodes:.1%})"
+        )
+        print(f"illicit={int((data.y == 1).sum()):,} licit={int((data.y == 0).sum()):,}")
     out = save_processed(data, cfg)
-    n_lab = int((~torch.isnan(data.y)).sum())
-    print(
-        f"nodes={data.num_nodes:,} edges={data.edge_index.size(1):,} "
-        f"labeled={n_lab:,} ({n_lab / data.num_nodes:.1%})"
-    )
-    print(f"illicit={int((data.y == 1).sum()):,} licit={int((data.y == 0).sum()):,}")
     print(f"saved -> {out}  ({time.time() - t0:.1f}s)")
+
+
+def _train_one_hetero(
+    model_name: str, overrides: dict | None = None, tag: str | None = None
+) -> dict:
+    """Merged-mode training pipeline (HeteroGNN, actor classification)."""
+    del model_name  # hetero mode trains the SAGE-based HeteroGNN regardless
+    overrides = dict(overrides or {})
+    overrides.setdefault("data.dataset", "ellipticpp")
+    overrides.setdefault("data.pp_mode", "merged")
+    cfg = load_config(overrides)
+    _set_seed(cfg.training.seed)
+
+    data = load_processed(cfg)
+
+    # scale each node type independently, fit on train-period rows
+    t_tx, t_ac = data["tx"].t, data["actor"].t
+    for nt, t in (("tx", t_tx), ("actor", t_ac)):
+        m = t <= cfg.split.train_max_t
+        if int(m.sum()) < 2:
+            m = torch.ones(data[nt].num_nodes, dtype=torch.bool)
+        mu, sd = data[nt].x[m].mean(dim=0), data[nt].x[m].std(dim=0).clamp_min(1e-8)
+        data[nt].x = (data[nt].x - mu) / sd
+        data[nt].x = torch.nan_to_num(data[nt].x, nan=0.0)
+
+    from .train_hetero import evaluate_hetero, train_hetero
+
+    history, artifacts = train_hetero(data, cfg)
+    metrics = evaluate_hetero(artifacts["model"], data, cfg)
+    n_params = sum(p.numel() for p in artifacts["model"].parameters())
+    row = {
+        "model": "heterosage",
+        "roc_auc": round(metrics["roc_auc"], 4),
+        "pr_auc": round(metrics["pr_auc"], 4),
+        "f1": round(metrics["f1"], 4),
+        "precision": round(metrics["precision"], 4),
+        "recall": round(metrics["recall"], 4),
+        "threshold": round(float(artifacts["threshold"]), 4),
+        "params": n_params,
+        "best_epoch": artifacts["best_epoch"],
+        "train_s": round(artifacts["train_seconds"], 1),
+    }
+    ckpt = Path(cfg.checkpoint_dir) / "heterosage_merged.pt"
+    torch.save(artifacts["model"].state_dict(), ckpt)
+    print(f"\n=== HETERO-SAGE (merged tx+actors) | params={n_params:,} ===")
+    print(
+        f"  test ROC-AUC {row['roc_auc']:.4f} | PR-AUC {row['pr_auc']:.4f} "
+        f"| F1 {row['f1']:.4f} | P {row['precision']:.4f} | R {row['recall']:.4f}"
+    )
+    return row
 
 
 def _train_one(model_name: str, overrides: dict | None = None, tag: str | None = None) -> dict:
@@ -133,6 +198,10 @@ def _train_one(model_name: str, overrides: dict | None = None, tag: str | None =
 
 def cmd_train(args) -> None:
     overrides = {"model.name": args.model}
+    if args.dataset:
+        overrides["data.dataset"] = args.dataset
+    if args.mode:
+        overrides["data.pp_mode"] = args.mode
     if args.epochs:
         overrides["training.epochs"] = args.epochs
     if args.lr:
@@ -141,16 +210,24 @@ def cmd_train(args) -> None:
         overrides["model.hidden_dim"] = args.hidden
     if args.focal_gamma is not None:
         overrides["training.focal_gamma"] = args.focal_gamma
-    row = _train_one(args.model, overrides, tag=args.tag)
+    if overrides.get("data.pp_mode") == "merged":
+        row = _train_one_hetero(args.model, overrides, tag=args.tag)
+    else:
+        row = _train_one(args.model, overrides, tag=args.tag)
     print(json.dumps(row, indent=2))
 
 
 def cmd_compare(args) -> None:
     out_csv = Path("reports") / "model_comparison.csv"
+    overrides = {}
+    if args.dataset:
+        overrides["data.dataset"] = args.dataset
+    if args.mode:
+        overrides["data.pp_mode"] = args.mode
     rows = []
     for name in args.models:
         try:
-            rows.append(_train_one(name, {}, tag=f"compare-{name}"))
+            rows.append(_train_one(name, dict(overrides), tag=f"compare-{name}"))
         except Exception as e:
             print(f"!! {name} failed: {e}", file=sys.stderr)
             raise
@@ -208,10 +285,16 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("prepare", help="build processed graph from raw CSVs")
+    p.add_argument("--dataset", default=None, choices=["elliptic", "ellipticpp"])
+    p.add_argument("--mode", default=None, choices=["tx", "actors", "merged"])
     p.set_defaults(func=cmd_prepare)
 
     p = sub.add_parser("train", help="train a single model")
-    p.add_argument("--model", default="gat", choices=["gcn", "gat", "graphsage", "gin", "mlp"])
+    p.add_argument(
+        "--model", default="gat", choices=["gcn", "gat", "graphsage", "gin", "mlp", "heterosage"]
+    )
+    p.add_argument("--dataset", default=None, choices=["elliptic", "ellipticpp"])
+    p.add_argument("--mode", default=None, choices=["tx", "actors", "merged"])
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--hidden", type=int, default=None)
@@ -221,6 +304,8 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("compare", help="train all models and compare")
     p.add_argument("--models", nargs="+", default=["mlp", "gcn", "gat", "graphsage", "gin"])
+    p.add_argument("--dataset", default=None, choices=["elliptic", "ellipticpp"])
+    p.add_argument("--mode", default=None, choices=["tx", "actors", "merged"])
     p.set_defaults(func=cmd_compare)
 
     p = sub.add_parser("explain", help="explain predictions (Captum)")

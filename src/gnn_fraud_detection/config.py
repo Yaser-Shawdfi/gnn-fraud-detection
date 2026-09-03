@@ -19,7 +19,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "settings.yaml"
 
-VALID_MODELS = ("gcn", "gat", "graphsage", "gin", "mlp")
+VALID_MODELS = ("gcn", "gat", "graphsage", "gin", "mlp", "heterosage")
 
 
 @dataclass
@@ -28,9 +28,11 @@ class DataConfig:
     processed_dir: Path
     checkpoint_dir: Path
     reports_dir: Path
-    features_file: str
-    edgelist_file: str
-    classes_file: str
+    dataset: str = "elliptic"
+    pp_mode: str = "actors"
+    features_file: str = "elliptic_txs_features.csv"
+    edgelist_file: str = "elliptic_txs_edgelist.csv"
+    classes_file: str = "elliptic_txs_classes.csv"
 
 
 @dataclass

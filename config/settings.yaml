@@ -7,8 +7,12 @@ data:
   processed_dir: data/processed
   checkpoint_dir: data/checkpoints
   reports_dir: reports
+  # Dataset: "elliptic" (classic 165-feature tx graph) or
+  #          "ellipticpp" (KDD'23: 183-feature txs + 822k wallet actors)
+  dataset: elliptic
+  # Graph mode for ellipticpp: tx | actors | merged
+  pp_mode: actors
   # Elliptic bitcoin dataset (Weber et al., 2019)
-  # 203,769 tx nodes / 166 features + time-step
   # classes: 1 = illicit, 2 = licit, unknown = unlabeled
   features_file: elliptic_txs_features.csv
   edgelist_file: elliptic_txs_edgelist.csv

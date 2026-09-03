@@ -95,11 +95,40 @@ def build_graph(cfg: Config) -> Data:
     return data
 
 
-def save_processed(data: Data, cfg: Config, name: str = "elliptic.pt") -> Path:
+def save_processed(data: Data, cfg: Config, name: str | None = None) -> Path:
+    if name is None:
+        name = processed_name(cfg)
     out = cfg.processed_dir / name
     torch.save(data, out)
     return out
 
 
-def load_processed(cfg: Config, name: str = "elliptic.pt") -> Data:
+def load_processed(cfg: Config, name: str | None = None) -> Data:
+    if name is None:
+        name = processed_name(cfg)
     return torch.load(cfg.processed_dir / name, weights_only=False)
+
+
+def processed_name(cfg: Config) -> str:
+    """Processed-file name derived from the dataset selection."""
+    if cfg.data.dataset == "ellipticpp":
+        return f"ellipticpp_{cfg.data.pp_mode}.pt"
+    return "elliptic.pt"
+
+
+def load_dataset(cfg: Config):
+    """Dispatch to the configured dataset/graph-mode builder."""
+    if cfg.data.dataset == "ellipticpp":
+        if cfg.data.pp_mode == "merged":
+            from .hetero import build_merged_hetero
+
+            return build_merged_hetero(cfg)
+        from .data_loader_pp import build_actor_graph, build_tx_graph_pp
+
+        mode = cfg.data.pp_mode
+        if mode == "tx":
+            return build_tx_graph_pp(cfg)
+        if mode == "actors":
+            return build_actor_graph(cfg)
+        raise ValueError(f"Unknown pp_mode: {mode} (tx | actors | merged)")
+    return build_graph(cfg)
